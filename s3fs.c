@@ -1,4 +1,4 @@
-/* This code is based on the fine code written by Joseph Pfeiffer for his
+http://www.accountkiller.com/removal-requested/* This code is based on the fine code written by Joseph Pfeiffer for his
    fuse system tutorial. */
 
 #include "s3fs.h"
@@ -42,6 +42,23 @@ void *fs_init(struct fuse_conn_info *conn)
 {
     fprintf(stderr, "fs_init --- initializing file system.\n");
     s3context_t *ctx = GET_PRIVATE_DATA;
+    char* s3bucket = (char*)ctx;
+    s3fs_clear_bucket(s3bucket);
+    s3dirent_t root_dir;
+    root_dir.type = 'D';
+    root_dir.name = ".";
+    char* key = "/";
+	// in the object is the address of the first s3dirent_t
+
+	// STAT MODIFICATIONS!
+	root_dir.protection = S_IFDIR;
+	root_dir.user_id = 0;
+	root_dir.hard_links = 0;
+	root_dir.size = 0;
+	root_dir.last_access = time(NULL);
+	root_dir.mod_time = time(NULL);
+	root_dir.status_change = time(NULL);
+    s3fs_put_object(s3bucket, key, (uint8_t*)&root_dir, sizeof(s3dirent_t)); 
     return ctx;
 }
 
@@ -65,7 +82,26 @@ void fs_destroy(void *userdata) {
 int fs_getattr(const char *path, struct stat *statbuf) {
     fprintf(stderr, "fs_getattr(path=\"%s\")\n", path);
     s3context_t *ctx = GET_PRIVATE_DATA;
-    return -EIO;
+	char* s3bucket = (char*)ctx;
+	s3dirent_t* dirs = NULL;
+    ssize_t size = s3fs_get_object(s3bucket, path, (uint8_t**)&dirs, 0, 0);
+    if (size<0) {
+        printf("This object does not exist\n");
+		return -ENOENT;
+	}
+	// the first "." holds all of the attributes
+	s3dirent_t this_dirent = dirs[0];
+    printf("directory value? %s\n", dirs[0].name);
+    // STAT
+	statbuf->st_mode = this_dirent.protection;
+	statbuf->st_uid = this_dirent.user_id;
+    statbuf->st_nlink = this_dirent.hard_links;
+	statbuf->st_size = this_dirent.size;
+	statbuf->st_atime = this_dirent.last_access;
+	statbuf->st_mtime = this_dirent.mod_time;
+	statbuf->st_ctime = this_dirent.status_change;
+	return 0;
+
 }
 
 
@@ -78,7 +114,15 @@ int fs_getattr(const char *path, struct stat *statbuf) {
 int fs_opendir(const char *path, struct fuse_file_info *fi) {
     fprintf(stderr, "fs_opendir(path=\"%s\")\n", path);
     s3context_t *ctx = GET_PRIVATE_DATA;
-    return -EIO;
+    char* s3bucket = (char*)ctx;
+	s3dirent_t* dirs = NULL;
+    ssize_t size = s3fs_get_object(s3bucket, path, (uint8_t**)&dirs, 0, 0);
+    if (size==-1){
+		return -EIO;
+	}
+    else {
+		return 0;
+	}
 }
 
 
@@ -92,7 +136,18 @@ int fs_readdir(const char *path, void *buf, fuse_fill_dir_t filler, off_t offset
     fprintf(stderr, "fs_readdir(path=\"%s\", buf=%p, offset=%d)\n",
           path, buf, (int)offset);
     s3context_t *ctx = GET_PRIVATE_DATA;
-    return -EIO;
+    char* s3bucket = (char*)ctx;
+	s3dirent_t* dirs = NULL;
+    ssize_t size = s3fs_get_object(s3bucket, path, (uint8_t**)&dirs, 0, 0);
+	int entries = size/sizeof(s3dirent_t);
+	int i=0;
+	for (;i<entries;i++) {
+        printf("NAME???? %s\n", dirs[i].name);
+		if (filler(buf,dirs[i].name,NULL,0) != 0) {
+			return -EIO;
+		}
+	}
+    return 0;
 }
 
 
@@ -117,9 +172,32 @@ int fs_releasedir(const char *path, struct fuse_file_info *fi) {
 int fs_mkdir(const char *path, mode_t mode) {
     fprintf(stderr, "fs_mkdir(path=\"%s\", mode=0%3o)\n", path, mode);
     s3context_t *ctx = GET_PRIVATE_DATA;
+    char* s3bucket = (char*)ctx;
     mode |= S_IFDIR;
-
-    return -EIO;
+	s3dirent_t* dirs = NULL;
+	// check if the directory already exists
+    ssize_t size = s3fs_get_object(s3bucket, path, (uint8_t**)&dirs, 0, 0);
+	if (size >= 0) {
+        printf("This Directory Already Exists!\n");
+		return -EIO;
+	}
+	// put a new object
+	s3dirent_t new_dir_obj;
+	new_dir_obj.name = ".";
+    s3fs_put_object(s3bucket, path, (uint8_t*)&new_dir_obj, sizeof(s3dirent_t));
+	// add to end of directory
+	char* directory = dirname(path);
+	char* base = basename(path);
+    size = s3fs_get_object(s3bucket, directory, (uint8_t**)&dirs, 0, 0);
+	if (size < 0) {
+		return -EIO;
+	}
+	int entries = size/sizeof(s3dirent_t);
+	s3dirent_t new_dirent;
+	new_dirent.name = base;
+	dirs[entries+1] = new_dirent;
+	s3fs_put_object(s3bucket, directory, (uint8_t*)&dirs, sizeof(dirs));
+    return 0;
 }
 
 
